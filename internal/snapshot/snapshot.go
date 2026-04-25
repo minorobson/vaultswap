@@ -74,3 +74,14 @@ func Load(filePath string) (*Snapshot, error) {
 	}
 	return &s, nil
 }
+
+// KeyNames returns a sorted list of secret key names present in the snapshot.
+// This is useful for comparing the structure of two snapshots without exposing values.
+func (s *Snapshot) KeyNames() []string {
+	keys := make([]string, 0, len(s.Data))
+	for k := range s.Data {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
