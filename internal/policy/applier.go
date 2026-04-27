@@ -46,3 +46,22 @@ func (a *Applier) Apply(ctx context.Context, p *Policy) (*ApplyResult, error) {
 
 	return result, nil
 }
+
+// ApplyAll applies a slice of policies and returns all results. It continues
+// on individual policy failures, collecting errors alongside results so the
+// caller can decide how to handle partial failures.
+func (a *Applier) ApplyAll(ctx context.Context, policies []*Policy) ([]*ApplyResult, []error) {
+	results := make([]*ApplyResult, 0, len(policies))
+	var errs []error
+
+	for _, p := range policies {
+		result, err := a.Apply(ctx, p)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		results = append(results, result)
+	}
+
+	return results, errs
+}
