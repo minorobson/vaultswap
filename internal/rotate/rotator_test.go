@@ -91,3 +91,28 @@ func TestRotate_WriteError(t *testing.T) {
 		t.Fatal("expected error, got nil")
 	}
 }
+
+func TestRotate_MultipleKeys(t *testing.T) {
+	client := &mockClient{
+		data: map[string]interface{}{
+			"password": "old-pass",
+			"api_key":  "old-key",
+			"user":     "alice",
+		},
+	}
+	r := rotate.New(client, rotate.Options{KeysToRotate: []string{"password", "api_key"}})
+
+	_, err := r.Rotate(context.Background(), "secret/myapp")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if client.written["password"] == "old-pass" {
+		t.Error("password should have been rotated")
+	}
+	if client.written["api_key"] == "old-key" {
+		t.Error("api_key should have been rotated")
+	}
+	if client.written["user"] != "alice" {
+		t.Error("non-rotated key user should be preserved")
+	}
+}
