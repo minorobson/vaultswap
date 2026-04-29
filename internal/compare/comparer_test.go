@@ -48,6 +48,25 @@ func TestComparePath_NoDiff(t *testing.T) {
 	}
 }
 
+func TestComparePath_WithDiff(t *testing.T) {
+	srcSrv := newVaultServer(t, map[string]interface{}{"key": "value1"})
+	defer srcSrv.Close()
+	dstSrv := newVaultServer(t, map[string]interface{}{"key": "value2"})
+	defer dstSrv.Close()
+
+	src := newClient(t, srcSrv.URL)
+	dst := newClient(t, dstSrv.URL)
+	cmp := compare.New(src, dst, false)
+
+	res, err := cmp.ComparePath("secret/myapp")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !res.HasDiff {
+		t.Error("expected diff between source and destination, got none")
+	}
+}
+
 func TestComparePaths_ReturnsSingleResult(t *testing.T) {
 	srv := newVaultServer(t, map[string]interface{}{"a": "1"})
 	defer srv.Close()
