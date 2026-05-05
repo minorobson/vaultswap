@@ -1,12 +1,16 @@
+// Package diff provides utilities for comparing secret maps and formatting
+// human-readable change previews with optional value masking.
 package diff
 
 import (
 	"fmt"
+	"io"
+	"os"
 	"sort"
 	"strings"
 )
 
-// ChangeType represents the type of change for a secret key.
+// ChangeType represents the kind of change detected for a secret key.
 type ChangeType string
 
 const (
@@ -16,22 +20,94 @@ const (
 	Unchanged ChangeType = "unchanged"
 )
 
-// Change represents a single key-level diff entry.
+// Change describes a single key-level difference between two secret maps.
 type Change struct {
-	Key      string
-	Type     ChangeType
-	OldValue string
-	NewValue string
+	Key    string
+	Type   ChangeType
+	OldVal string
+	NewVal string
 }
 
-// Result holds the full diff between two secret maps.
-type Result struct {
-	Changes []Change
+// Compare returns the list of changes between two secret maps (old → new).
+// Keys present only in old are Removed; keys only in new are Added;
+// keys in both with differing values are Modified; equal values are Unchanged.
+func Compare(old, new map[string]any) []Change {
+	keys := unionKeys(old, new)
+	sort.Strings(keys)
+
+	var changes []Change
+	for _, k := range keys {
+		oldVal, inOld := old[k]
+		newVal, inNew := new[k]
+
+		switch {
+		case inOld && !inNew:
+			changes = append(changes, Change{
+				Key:    k,
+				Type:   Removed,
+				OldVal: fmt.Sprintf("%v", oldVal),
+			})
+		case !inOld && inNew:
+			changes = append(changes, Change{
+				Key:    k,
+				Type:   Added,
+				NewVal: fmt.Sprintf("%v", newVal),
+			})
+		default:
+			ov := fmt.Sprintf("%v", oldVal)
+			nv := fmt.Sprintf("%v", newVal)
+			if ov != nv {
+				changes = append(changes, Change{
+					Key:    k,
+					Type:   Modified,
+					OldVal: ov,
+					NewVal: nv,
+				})
+			} else {
+				changes = append(changes, Change{
+					Key:    k,
+					Type:   Unchanged,
+					OldVal: ov,
+					NewVal: nv,
+				})
+			}
+		}
+	}
+	return changes
 }
 
-// HasChanges returns true if there are any non-unchanged entries.
-func (r *Result) HasChanges() bool {
-	for _, c := range r.Changes {
+// Format writes a human-readable diff to stdout.
+func Format(changes []Change, maskValues bool) {
+	FprintDiff(os.Stdout, changes, maskValues)
+}
+
+// FprintDiff writes a human-readable diff to w.
+func FprintDiff(w io.Writer, changes []Change, maskValues bool) {
+	if len(changes) == 0 {
+		fmt.Fprintln(w, "  (no changes)")
+		return
+	}
+	for _, c := range changes {
+		switch c.Type {
+		case Added:
+			fmt.Fprintf(w, "  + %-30s %s\n", c.Key, valueOrMask(c.NewVal, maskValues))
+		case Removed:
+			fmt.Fprintf(w, "  - %-30s %s\n", c.Key, valueOrMask(c.OldVal, maskValues))
+		case Modified:
+			fmt.Fprintf(w, "  ~ %-30s %s → %s\n",
+				c.Key,
+				valueOrMask(c.OldVal, maskValues),
+				valueOrMask(c.NewVal, maskValues),
+			)
+		case Unchanged:
+			fmt.Fprintf(w, "    %-30s (unchanged)\n", c.Key)
+		}
+	}
+}
+
+// HasChanges returns true if any of the changes are not Unchanged.
+func HasChanges(changes []Change) bool {
+	for _, c := range changes {
 		if c.Type != Unchanged {
 			return true
 		}
@@ -39,72 +115,17 @@ func (r *Result) HasChanges() bool {
 	return false
 }
 
-// Compare computes the diff between src and dst secret maps.
-func Compare(src, dst map[string]interface{}) *Result {
-	result := &Result{}
-	keys := unionKeys(src, dst)
-
-	for _, k := range keys {
-		srcVal, srcOk := src[k]
-		dstVal, dstOk := dst[k]
-
-		switch {
-		case srcOk && !dstOk:
-			result.Changes = append(result.Changes, Change{
-				Key: k, Type: Added,
-				NewValue: fmt.Sprintf("%v", srcVal),
-			})
-		case !srcOk && dstOk:
-			result.Changes = append(result.Changes, Change{
-				Key: k, Type: Removed,
-				OldValue: fmt.Sprintf("%v", dstVal),
-			})
-		default:
-			srcStr := fmt.Sprintf("%v", srcVal)
-			dstStr := fmt.Sprintf("%v", dstVal)
-			if srcStr != dstStr {
-				result.Changes = append(result.Changes, Change{
-					Key: k, Type: Modified,
-					OldValue: dstStr, NewValue: srcStr,
-				})
-			} else {
-				result.Changes = append(result.Changes, Change{
-					Key: k, Type: Unchanged,
-				})
-			}
-		}
-	}
-	return result
-}
-
-// Format renders the diff result as a human-readable string.
-func Format(r *Result, maskValues bool) string {
-	var sb strings.Builder
-	for _, c := range r.Changes {
-		switch c.Type {
-		case Added:
-			val := valueOrMask(c.NewValue, maskValues)
-			fmt.Fprintf(&sb, "+ %s = %s\n", c.Key, val)
-		case Removed:
-			fmt.Fprintf(&sb, "- %s\n", c.Key)
-		case Modified:
-			oldVal := valueOrMask(c.OldValue, maskValues)
-			newVal := valueOrMask(c.NewValue, maskValues)
-			fmt.Fprintf(&sb, "~ %s: %s -> %s\n", c.Key, oldVal, newVal)
-		}
-	}
-	return sb.String()
-}
-
+// valueOrMask returns the value or a masked placeholder depending on the flag.
 func valueOrMask(v string, mask bool) string {
 	if mask {
-		return "***"
+		return strings.Repeat("*", 8)
 	}
 	return v
 }
 
-func unionKeys(a, b map[string]interface{}) []string {
-	seen := make(map[string]struct{})
+// unionKeys returns the deduplicated union of keys from both maps.
+func unionKeys(a, b map[string]any) []string {
+	seen := make(map[string]struct{}, len(a)+len(b))
 	for k := range a {
 		seen[k] = struct{}{}
 	}
@@ -115,6 +136,5 @@ func unionKeys(a, b map[string]interface{}) []string {
 	for k := range seen {
 		keys = append(keys, k)
 	}
-	sort.Strings(keys)
 	return keys
 }
