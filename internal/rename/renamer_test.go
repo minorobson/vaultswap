@@ -1,16 +1,15 @@
 package rename_test
 
 import (
-	"bytes"
-	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	vaultapi "github.com/hashicorp/vault/api"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/yourusername/vaultswap/internal/rename"
 	"github.com/yourusername/vaultswap/internal/vault"
@@ -18,106 +17,113 @@ import (
 
 func newRenameServer(t *testing.T) (*httptest.Server, map[string]map[string]interface{}) {
 	t.Helper()
-	store := map[string]map[string]interface{}{
-		"secret/data/src": {"foo": "bar"},
-	}
-	deleted := map[string]bool{}
+	store := map[string]map[string]interface{}{}
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/v1/")
+
 		switch r.Method {
 		case http.MethodGet:
-			if data, ok := store[path]; ok {
-				json.NewEncoder(w).Encode(map[string]interface{}{"data": map[string]interface{}{"data": data}})
-			} else {
+			data, ok := store[path]
+			if !ok {
 				w.WriteHeader(http.StatusNotFound)
+				return
 			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"data": map[string]interface{}{"data": data},
+			})
 		case http.MethodPost, http.MethodPut:
 			var body map[string]interface{}
-			json.NewDecoder(r.Body).Decode(&body)
+			_ = json.NewDecoder(r.Body).Decode(&body)
 			if d, ok := body["data"]; ok {
-				store[path] = d.(map[string]interface{})
+				if dm, ok := d.(map[string]interface{}); ok {
+					store[path] = dm
+				}
 			}
-			w.WriteHeader(http.StatusNoContent)
+			w.WriteHeader(http.StatusOK)
 		case http.MethodDelete:
-			deleted[path] = true
 			delete(store, path)
 			w.WriteHeader(http.StatusNoContent)
 		}
-		_ = deleted
 	}))
-	return srv, store
+
+	t.Cleanup(server.Close)
+	return server, store
 }
 
-func newRenameClient(t *testing.T, addr string) *vault.Client {
+func newRenameClient(t *testing.T, addr string) *vaultapi.Client {
 	t.Helper()
-	c, err := vault.NewClient(vault.Config{Address: addr, Token: "test"})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	c, err := vault.NewClient(vault.Config{
+		Address: addr,
+		Token:   "test-token",
+	})
+	require.NoError(t, err)
 	return c
 }
 
 func TestRename_Success(t *testing.T) {
-	srv, store := newRenameServer(t)
-	defer srv.Close()
+	server, store := newRenameServer(t)
+	client := newRenameClient(t, server.URL)
 
-	client := newRenameClient(t, srv.URL)
-	r := rename.New(client, false)
-	res := r.RenamePath(context.Background(), "secret/src", "secret/dst")
+	// Pre-populate source path
+	store["secret/data/old-key"] = map[string]interface{}{"username": "admin", "password": "secret"}
 
-	if res.Err != nil {
-		t.Fatalf("unexpected error: %v", res.Err)
-	}
-	if _, ok := store["secret/data/dst"]; !ok {
-		t.Error("expected dst to be written")
-	}
-	if _, ok := store["secret/data/src"]; ok {
-		t.Error("expected src to be deleted")
-	}
+	r := rename.New(client)
+	result, err := r.Rename("secret", "old-key", "new-key", false)
+	require.NoError(t, err)
+
+	assert.Equal(t, "old-key", result.OldPath)
+	assert.Equal(t, "new-key", result.NewPath)
+	assert.False(t, result.DryRun)
+	assert.NoError(t, result.Err)
+
+	// Destination should now exist
+	_, destExists := store["secret/data/new-key"]
+	assert.True(t, destExists, "destination path should exist after rename")
+
+	// Source should be removed
+	_, srcExists := store["secret/data/old-key"]
+	assert.False(t, srcExists, "source path should be deleted after rename")
 }
 
 func TestRename_DryRun_DoesNotWrite(t *testing.T) {
-	srv, store := newRenameServer(t)
-	defer srv.Close()
+	server, store := newRenameServer(t)
+	client := newRenameClient(t, server.URL)
 
-	client := newRenameClient(t, srv.URL)
-	r := rename.New(client, true)
-	res := r.RenamePath(context.Background(), "secret/src", "secret/dst")
+	store["secret/data/old-key"] = map[string]interface{}{"api_key": "abc123"}
 
-	if res.Err != nil {
-		t.Fatalf("unexpected error: %v", res.Err)
-	}
-	if !res.DryRun {
-		t.Error("expected DryRun=true")
-	}
-	if _, ok := store["secret/data/dst"]; ok {
-		t.Error("dry-run should not write dst")
-	}
-	if _, ok := store["secret/data/src"]; !ok {
-		t.Error("dry-run should not delete src")
-	}
+	r := rename.New(client)
+	result, err := r.Rename("secret", "old-key", "new-key", true)
+	require.NoError(t, err)
+
+	assert.True(t, result.DryRun)
+	assert.Equal(t, "old-key", result.OldPath)
+	assert.Equal(t, "new-key", result.NewPath)
+
+	// Nothing should have changed
+	_, srcExists := store["secret/data/old-key"]
+	assert.True(t, srcExists, "source should still exist in dry-run mode")
+
+	_, destExists := store["secret/data/new-key"]
+	assert.False(t, destExists, "destination should not be created in dry-run mode")
 }
 
 func TestFprintResults_Labels(t *testing.T) {
+	var sb strings.Builder
+
 	results := []rename.Result{
-		{Src: "a", Dst: "b", DryRun: true},
-		{Src: "c", Dst: "d"},
-		{Src: "e", Dst: "f", Err: fmt.Errorf("boom")},
+		{OldPath: "secrets/alpha", NewPath: "secrets/beta", DryRun: false, Err: nil},
+		{OldPath: "secrets/gamma", NewPath: "secrets/delta", DryRun: true, Err: nil},
+		{OldPath: "secrets/bad", NewPath: "secrets/worse", DryRun: false, Err: assert.AnError},
 	}
-	var buf bytes.Buffer
-	rename.FprintResults(&buf, results)
-	out := buf.String()
 
-	if !strings.Contains(out, "[dry-run]") {
-		t.Error("expected dry-run label")
-	}
-	if !strings.Contains(out, "[renamed]") {
-		t.Error("expected renamed label")
-	}
-	if !strings.Contains(out, "[error]") {
-		t.Error("expected error label")
-	}
+	rename.FprintResults(&sb, results)
+	out := sb.String()
+
+	assert.Contains(t, out, "renamed")
+	assert.Contains(t, out, "dry-run")
+	assert.Contains(t, out, "error")
+	assert.Contains(t, out, "secrets/alpha")
+	assert.Contains(t, out, "secrets/beta")
 }
-
-var _ = vaultapi.DefaultConfig // ensure vault import used
