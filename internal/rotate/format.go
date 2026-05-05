@@ -23,3 +23,14 @@ func PrintResult(w io.Writer, r *Result) {
 	fmt.Fprintf(tw, "Rotated at:\t%s\n", r.RotatedAt.Format(time.RFC3339))
 	fmt.Fprintf(tw, "Keys rotated:\t%s\n", strings.Join(r.Keys, ", "))
 }
+
+// PrintResults writes a human-readable summary of multiple rotation Results to w,
+// separating each entry with a blank line.
+func PrintResults(w io.Writer, results []*Result) {
+	for i, r := range results {
+		if i > 0 {
+			fmt.Fprintln(w)
+		}
+		PrintResult(w, r)
+	}
+}
