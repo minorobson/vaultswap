@@ -68,6 +68,18 @@ func TestPrunePath_NonEmpty_Skipped(t *testing.T) {
 	}
 }
 
+func TestPrunePath_DeleteForbidden_ReturnsError(t *testing.T) {
+	srv := newPruneServer(t, "secret", "empty/key", map[string]interface{}{}, false)
+	defer srv.Close()
+
+	p := New(newPruneClient(t, srv.URL), false)
+	res := p.PrunePath(context.Background(), "secret", "empty/key")
+
+	if res.Err == nil {
+		t.Errorf("expected an error when delete is forbidden, got nil")
+	}
+}
+
 func TestPrunePaths_ReturnsAllResults(t *testing.T) {
 	srv := newPruneServer(t, "secret", "empty/key", map[string]interface{}{}, true)
 	defer srv.Close()
@@ -90,7 +102,7 @@ func TestFprintResults_Labels(t *testing.T) {
 	FprintResults(&sb, results)
 	out := sb.String()
 
-	for _, want := range []string{"[pruned]", "[dry-run]", "[skipped]"} {
+	for _, want := range []string{"[pruned]", "[dry-run]", "[skipped]"}  {
 		if !strings.Contains(out, want) {
 			t.Errorf("expected output to contain %q, got:\n%s", want, out)
 		}
