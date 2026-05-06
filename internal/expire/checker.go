@@ -71,6 +71,17 @@ func (c *Checker) CheckPaths(ctx context.Context, paths []string) []Result {
 	return results
 }
 
+// ExpiredResults filters results and returns only those that have expired.
+func ExpiredResults(results []Result) []Result {
+	expired := make([]Result, 0)
+	for _, r := range results {
+		if r.Expired {
+			expired = append(expired, r)
+		}
+	}
+	return expired
+}
+
 // currentVersionCreatedTime extracts the created_time of the current version
 // from KV v2 metadata.
 func currentVersionCreatedTime(data map[string]interface{}) time.Time {
